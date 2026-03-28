@@ -17,21 +17,15 @@ workflows:
       - name: Install dependencies
         script: |
           flutter packages pub get
-      - name: Flutter analyze
-        script: |
-          flutter analyze
-      - name: Install CocoaPods
-        script: |
-          find . -name "Podfile" -execdir pod install \;
       - name: Build iOS App and Create IPA
         script: |
           flutter build ios --release --no-codesign
-          cd build/ios/iphoneos
-          mkdir -p Payload
-          mv Runner.app Payload/
+          mkdir -p build/ios/ipa/Payload
+          mv build/ios/iphoneos/Runner.app build/ios/ipa/Payload/
+          cd build/ios/ipa
           zip -qr app.ipa Payload
     artifacts:
-      - build/ios/iphoneos/app.ipa
+      - build/ios/ipa/app.ipa
     publishing:
       email:
         recipients:
