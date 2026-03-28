@@ -1,0 +1,33 @@
+name: volt_remote_app
+description: VOLT TV Ultra-Premium Remote App
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  google_fonts: ^6.1.0
+  material_symbols_icons: ^4.2.34
+  flutter_svg: ^2.0.9
+  provider: ^6.1.2
+  shared_preferences: ^2.3.0
+  http: ^1.2.0
+  web_socket_channel: ^3.0.0
+  network_info_plus: ^6.1.0
+  multicast_dns: ^0.3.2+1
+  speech_to_text: ^7.0.0
+  permission_handler: ^11.3.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.1
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/icons/
