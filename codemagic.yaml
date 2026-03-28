@@ -23,12 +23,15 @@ workflows:
       - name: Install CocoaPods
         script: |
           find . -name "Podfile" -execdir pod install \;
-      - name: Build iOS App
+      - name: Build iOS App and Create IPA
         script: |
           flutter build ios --release --no-codesign
+          cd build/ios/iphoneos
+          mkdir -p Payload
+          mv Runner.app Payload/
+          zip -qr app.ipa Payload
     artifacts:
-      - build/ios/iphoneos/*.app
-      - build/ios/archive/*.xcarchive
+      - build/ios/iphoneos/app.ipa
     publishing:
       email:
         recipients:
