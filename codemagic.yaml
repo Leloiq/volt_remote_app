@@ -43,9 +43,22 @@ workflows:
           flutter packages pub get
       - name: Build iOS App and Create IPA
         script: |
+          set -e # Stop on error
           flutter build ios --release --no-codesign
+          
           mkdir -p build/ios/ipa/Payload
-          mv build/ios/iphoneos/Runner.app build/ios/ipa/Payload/
+          
+          # Flutter puts the output in Release-iphoneos, and optionally a symlink in iphoneos.
+          # We use cp -RL to ensure we copy the actual directory, not just a symlink.
+          if [ -d "build/ios/Release-iphoneos/Runner.app" ]; then
+            cp -RL build/ios/Release-iphoneos/Runner.app build/ios/ipa/Payload/
+          elif [ -d "build/ios/iphoneos/Runner.app" ]; then
+            cp -RL build/ios/iphoneos/Runner.app build/ios/ipa/Payload/
+          else
+            echo "Error: Could not find Runner.app"
+            exit 1
+          fi
+          
           cd build/ios/ipa
           zip -qr app.ipa Payload
     artifacts:
