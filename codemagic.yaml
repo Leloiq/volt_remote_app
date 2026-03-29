@@ -1,33 +1,73 @@
 workflows:
-  ios-unsigned-ipa:
-    name: iOS Unsigned IPA (AltStore)
+  ios-release:
+    name: iOS Release Pipeline
     instance_type: mac_mini_m2
-
     environment:
       flutter: stable
-
+      xcode: latest
+      cocoapods: default
     triggering:
       events:
         - push
       branch_patterns:
         - pattern: main
           include: true
-
+          source: true
     scripts:
       - name: Install dependencies
         script: |
-          flutter pub get
-
-      - name: Build iOS (NO SIGNING)
+          flutter packages pub get
+      - name: Build iOS App and Create IPA
         script: |
-          flutter build ios --release --no-codesign
-
-      - name: Create IPA manually
-        script: |
+          set -e # Stop on error
+          
+          # 1. Force manual signing style inside the Xcode project BEFORE Flutter ever looks at it!
+          # This completely prevents Flutter's pre-flight team check from aborting the script early.
+          sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' ios/Runner.xcodeproj/project.pbxproj || true
+          sed -i '' 's/CODE_SIGN_IDENTITY = "Apple Development";/CODE_SIGN_IDENTITY = "";/g' ios/Runner.xcodeproj/project.pbxproj || true
+          sed -i '' 's/"CODE_SIGN_IDENTITY\[sdk=iphoneos\*\]" = "iPhone Developer";/"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "";/g' ios/Runner.xcodeproj/project.pbxproj || true
+          sed -i '' 's/"CODE_SIGN_IDENTITY" = "iPhone Developer";/"CODE_SIGN_IDENTITY" = "";/g' ios/Runner.xcodeproj/project.pbxproj || true
+          
+          # 2. Trigger Flutter to generate Podfile and setup the workspace
+          # Now it will succeed safely without asking for certificates!
+          flutter build ios --config-only
+          
+          # 3. Add to Podfile to forcefully suppress singing requirements for all Pods
+          if [ -f "ios/Podfile" ]; then
+            echo "post_install do |installer|" >> ios/Podfile
+            echo "  installer.pods_project.targets.each do |target|" >> ios/Podfile
+            echo "    target.build_configurations.each do |config|" >> ios/Podfile
+            echo "      config.build_settings['CODE_SIGNING_ALLOWED'] = 'NO'" >> ios/Podfile
+            echo "      config.build_settings['CODE_SIGNING_REQUIRED'] = 'NO'" >> ios/Podfile
+            echo "      config.build_settings['CODE_SIGN_IDENTITY'] = '-'" >> ios/Podfile
+            echo "      config.build_settings['EXPANDED_CODE_SIGN_IDENTITY'] = '-'" >> ios/Podfile
+            echo "    end" >> ios/Podfile
+            echo "  end" >> ios/Podfile
+            echo "end" >> ios/Podfile
+            cd ios && pod install && cd ..
+          fi
+          
+          # 4. Use raw xcodebuild with Ad-Hoc signing ("-") to bypass the Apple Developer requirement
+          cd ios
+          xcodebuild build -workspace Runner.xcworkspace -scheme Runner -configuration Release \
+            CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="-" EXPANDED_CODE_SIGN_IDENTITY="-" \
+            -destination 'generic/platform=iOS' \
+            SYMROOT="${PWD}/../build/ios" \
+            COMPILER_INDEX_STORE_ENABLE=NO
+          cd ..
+          
+          # 5. Package the IPA accurately
           mkdir -p build/ios/ipa/Payload
-          cp -r build/ios/iphoneos/Runner.app build/ios/ipa/Payload/
+          
+          if [ -d "build/ios/Release-iphoneos/Runner.app" ]; then
+            cp -RL build/ios/Release-iphoneos/Runner.app build/ios/ipa/Payload/
+          else
+            echo "Error: Could not find Runner.app"
+            exit 1
+          fi
+          
           cd build/ios/ipa
-          zip -r app.ipa Payload
-
+          zip -qr app.ipa Payload
     artifacts:
       - build/ios/ipa/app.ipa
