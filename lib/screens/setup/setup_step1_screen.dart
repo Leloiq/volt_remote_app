@@ -4,7 +4,6 @@ import '../../theme/app_colors.dart';
 import '../../widgets/gradient_button.dart';
 import '../../widgets/glass_panel.dart';
 import '../../providers/remote_provider.dart';
-import '../../models/tv_device.dart';
 
 class SetupStep1Screen extends StatelessWidget {
   const SetupStep1Screen({super.key});
@@ -68,6 +67,9 @@ class SetupStep1Screen extends StatelessWidget {
                               final success = await provider.connectToDevice(device);
                               if (context.mounted) {
                                 if (success) {
+                                  Navigator.pushNamed(context, '/setup/3');
+                                } else if (provider.tempDevice != null) {
+                                  // Device requires pairing - go to Step 2
                                   Navigator.pushNamed(context, '/setup/2');
                                 } else {
                                   // Show error
@@ -190,12 +192,52 @@ class SetupStep1Screen extends StatelessWidget {
               ),
               const SizedBox(height: 16),
               TextButton(
-                onPressed: () {},
-                child: const Text("I DON'T HAVE A POWER BUTTON", style: TextStyle(color: AppColors.onSurfaceVariant, fontSize: 10, letterSpacing: 2, fontWeight: FontWeight.w600)),
+                onPressed: () => _showManualIpDialog(context),
+                child: const Text("ENTER TV IP MANUALLY", style: TextStyle(color: AppColors.onSurfaceVariant, fontSize: 10, letterSpacing: 2, fontWeight: FontWeight.w600)),
               ),
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  void _showManualIpDialog(BuildContext context) {
+    final controller = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: AppColors.surfaceContainerLowest,
+        title: const Text('Manual IP Entry', style: TextStyle(color: Colors.white)),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          style: const TextStyle(color: Colors.white),
+          decoration: const InputDecoration(
+            hintText: 'e.g. 192.168.1.50',
+            hintStyle: TextStyle(color: Colors.white24),
+            enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.white24)),
+            focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: AppColors.primaryContainer)),
+          ),
+          keyboardType: TextInputType.number,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('CANCEL', style: TextStyle(color: Colors.white54)),
+          ),
+          TextButton(
+            onPressed: () {
+              final ip = controller.text.trim();
+              if (ip.isNotEmpty) {
+                Navigator.pop(context);
+                context.read<RemoteProvider>().addManualDevice(ip);
+                // The provider will handle navigation to pairing if needed
+              }
+            },
+            child: const Text('CONNECT', style: TextStyle(color: AppColors.primaryContainer)),
+          ),
+        ],
       ),
     );
   }

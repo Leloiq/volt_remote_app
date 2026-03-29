@@ -7,7 +7,10 @@ import 'cast_controller.dart';
 import 'dlna_controller.dart';
 
 /// Factory class that creates the correct controller for a given TV device.
-/// This is the single entry point for instantiating platform-specific controllers.
+/// 
+/// For Android TV and Chromecast, the RemoteProvider handles connection
+/// directly via the ConnectionManager (TLS protocol + fallbacks).
+/// This factory is used for non-Android TV brands (Samsung, LG, etc).
 class ControllerFactory {
   /// Create the appropriate controller based on device brand.
   static TVDeviceController create(TvDevice device) {
@@ -17,10 +20,13 @@ class ControllerFactory {
       case TvBrand.lg:
         return WebOSController(device);
       case TvBrand.androidTv:
+        // The real connection is handled by RemoteProvider + ConnectionManager.
+        // This creates a standalone controller for fallback scenarios.
         return AndroidTVController(device);
       case TvBrand.chromecast:
         return CastController(device);
       case TvBrand.roku:
+        return DLNAController(device);
       case TvBrand.unknown:
         return DLNAController(device);
     }

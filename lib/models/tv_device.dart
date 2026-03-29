@@ -80,6 +80,7 @@ class TvDevice {
   final String? macAddress;
   final String? descriptionUrl;
   final String? modelName;
+  final String? pairingToken;
   final TvBrand brand;
   final DeviceCapabilities capabilities;
 
@@ -91,6 +92,7 @@ class TvDevice {
     this.macAddress,
     this.descriptionUrl,
     this.modelName,
+    this.pairingToken,
     this.brand = TvBrand.unknown,
     this.capabilities = const DeviceCapabilities(),
   });
@@ -101,6 +103,7 @@ class TvDevice {
     TvBrand? brand,
     DeviceCapabilities? capabilities,
     int? port,
+    String? pairingToken,
   }) {
     return TvDevice(
       id: id,
@@ -110,6 +113,7 @@ class TvDevice {
       macAddress: macAddress,
       descriptionUrl: descriptionUrl,
       modelName: modelName ?? this.modelName,
+      pairingToken: pairingToken ?? this.pairingToken,
       brand: brand ?? this.brand,
       capabilities: capabilities ?? this.capabilities,
     );
@@ -124,6 +128,7 @@ class TvDevice {
       'macAddress': macAddress,
       'descriptionUrl': descriptionUrl,
       'modelName': modelName,
+      'pairingToken': pairingToken,
       'brand': brand.name,
     };
   }
@@ -141,6 +146,7 @@ class TvDevice {
       macAddress: json['macAddress'] as String?,
       descriptionUrl: json['descriptionUrl'] as String?,
       modelName: json['modelName'] as String?,
+      pairingToken: json['pairingToken'] as String?,
       brand: brand,
       capabilities: _defaultCapabilities(brand),
     );

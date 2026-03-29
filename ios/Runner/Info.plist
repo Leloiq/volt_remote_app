@@ -12,6 +12,8 @@
 		<string>_dial._tcp</string>
 		<string>_companion-link._tcp</string>
 		<string>_ssdp._udp</string>
+		<string>_androidtvremote2._tcp</string>
+		<string>_androidtvremote._tcp</string>
 	</array>
 	<key>NSAppTransportSecurity</key>
 	<dict>

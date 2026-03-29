@@ -21,6 +21,10 @@ dependencies:
   multicast_dns: ^0.3.2+1
   speech_to_text: ^7.0.0
   permission_handler: ^11.3.0
+  pointycastle: ^3.9.1
+  flutter_secure_storage: ^9.2.4
+  basic_utils: ^5.7.0
+  asn1lib: ^1.5.8
 
 dev_dependencies:
   flutter_test:

@@ -5,13 +5,26 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/tv_device.dart';
 import '../models/remote_command.dart';
 import '../services/discovery_service.dart';
+import '../services/connection_manager.dart';
+import '../services/certificate_manager.dart';
 import '../controllers/tv_device_controller.dart';
 import '../controllers/controller_factory.dart';
+import '../controllers/android_tv_controller.dart';
 
 /// Central state manager for the entire remote control system.
 /// Optimized for ultra-low latency command delivery.
+///
+/// Integrates the multi-strategy ConnectionManager for Android TV devices:
+///   1. Android TV Remote Protocol v2 (TLS + protobuf)
+///   2. Google Cast HTTP fallback
+///   3. ADB over WiFi fallback
 class RemoteProvider extends ChangeNotifier with WidgetsBindingObserver {
   final DiscoveryService _discoveryService = DiscoveryService();
+
+  // --- Certificate and Connection Manager (shared across Android TV connections) ---
+  final CertificateManager _certManager = CertificateManager();
+  late final ConnectionManager _connectionManager;
+  bool _certInitialized = false;
 
   // --- Pre-cached instances (avoid async on hot path) ---
   SharedPreferences? _prefs;
@@ -30,6 +43,22 @@ class RemoteProvider extends ChangeNotifier with WidgetsBindingObserver {
   DeviceCapabilities get capabilities =>
       activeDevice?.capabilities ?? const DeviceCapabilities();
 
+  /// The active connection method (for Android TV devices).
+  ConnectionMethod get connectionMethod {
+    if (_controller is AndroidTVController) {
+      return (_controller as AndroidTVController).connectionMethod;
+    }
+    return ConnectionMethod.none;
+  }
+
+  // --- Pairing State ---
+  bool _isPairing = false;
+  bool get isPairing => _isPairing;
+  bool _pairingStarted = false;
+  bool get pairingStarted => _pairingStarted;
+  TvDevice? _tempDevice; // Device we are currently trying to pair with
+  TvDevice? get tempDevice => _tempDevice;
+
   // --- Reconnection ---
   Timer? _keepAliveTimer;
   Timer? _reconnectTimer;
@@ -45,6 +74,8 @@ class RemoteProvider extends ChangeNotifier with WidgetsBindingObserver {
   Stream<String> get onError => _errorController.stream;
 
   RemoteProvider() {
+    _connectionManager = ConnectionManager(_certManager);
+
     WidgetsBinding.instance.addObserver(this);
     // Pre-cache SharedPreferences on construction — never block the hot path
     SharedPreferences.getInstance().then((p) => _prefs = p);
@@ -60,15 +91,19 @@ class RemoteProvider extends ChangeNotifier with WidgetsBindingObserver {
     _backgroundDiscovery();
   }
 
+  /// Ensure certificates are ready (lazy init).
+  Future<void> _ensureCertInitialized() async {
+    if (!_certInitialized) {
+      await _certManager.initialize();
+      _certInitialized = true;
+    }
+  }
+
   // ============================================
   //  BACKGROUND DISCOVERY (runs on app start)
   // ============================================
 
   void _backgroundDiscovery() {
-    // Try to auto-reconnect to the last known device
-    _prefs?.getString('last_device_ip')?.let((ip) {
-      // We'll discover it via the normal scan
-    });
     // Fire a silent scan so devices are pre-populated
     Future.delayed(const Duration(seconds: 1), () {
       startScan(silent: true);
@@ -89,11 +124,23 @@ class RemoteProvider extends ChangeNotifier with WidgetsBindingObserver {
     if (_controller == null || !isConnected) {
       final lastIp = _prefs?.getString('last_device_ip');
       if (lastIp != null) {
-        final match = _discoveredDevices.where((d) => d.ip == lastIp).firstOrNull;
+        var match = _discoveredDevices.where((d) => d.ip == lastIp).firstOrNull;
         if (match != null) {
           await connectToDevice(match);
         }
       }
+    }
+  }
+
+  Future<void> addManualDevice(String ip) async {
+    _isScanning = true;
+    notifyListeners();
+    final device = await _discoveryService.addManualDevice(ip);
+    _isScanning = false;
+    notifyListeners();
+
+    if (device != null) {
+      await connectToDevice(device);
     }
   }
 
@@ -104,12 +151,123 @@ class RemoteProvider extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   // ============================================
+  //  PAIRING — Android TV Protocol v2
+  // ============================================
+
+  /// Start pairing with an Android TV device.
+  /// The TV will display a 6-digit code on screen.
+  Future<bool> startPairing(TvDevice device) async {
+    await _ensureCertInitialized();
+
+    _tempDevice = device;
+    _isPairing = true;
+    _pairingStarted = false;
+    notifyListeners();
+
+    try {
+      await _connectionManager.startPairing(device.ip);
+      _pairingStarted = true;
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _isPairing = false;
+      _pairingStarted = false;
+      _errorController.add('Pairing failed: ${e.toString()}');
+      notifyListeners();
+      return false;
+    }
+  }
+
+  /// Submit the 6-digit code shown on the TV screen.
+  Future<bool> submitPairingCode(String code) async {
+    if (_tempDevice == null) return false;
+
+    try {
+      final success = await _connectionManager.submitPairingCode(
+          _tempDevice!.ip, code);
+
+      if (success) {
+        // Pairing succeeded — now connect the remote control channel
+        _isPairing = false;
+        _pairingStarted = false;
+        notifyListeners();
+
+        // Connect using the full fallback chain
+        return await connectToDevice(_tempDevice!);
+      } else {
+        _errorController.add('Invalid pairing code. Please try again.');
+        notifyListeners();
+        return false;
+      }
+    } catch (e) {
+      _isPairing = false;
+      _errorController.add('Pairing verification failed: ${e.toString()}');
+      notifyListeners();
+      return false;
+    }
+  }
+
+  /// Check if a device needs pairing.
+  Future<bool> needsPairing(TvDevice device) async {
+    if (device.brand == TvBrand.androidTv ||
+        device.brand == TvBrand.chromecast) {
+      return !(await _connectionManager.isPaired(device.ip));
+    }
+    return false;
+  }
+
+  // ============================================
   //  CONNECTION (with auto-reconnect)
   // ============================================
 
   Future<bool> connectToDevice(TvDevice device) async {
+    // For Android TV / Chromecast: check if pairing is needed
+    if (device.brand == TvBrand.androidTv || device.brand == TvBrand.chromecast) {
+      final needsPair = await needsPairing(device);
+      if (needsPair) {
+        _tempDevice = device;
+        notifyListeners();
+        return false; // UI should navigate to pairing screen
+      }
+
+      // Use the new multi-strategy connection
+      await disconnect(clearLast: false);
+      await _ensureCertInitialized();
+
+      try {
+        _controller = AndroidTVController.withManager(device, _connectionManager);
+        _lastDevice = device;
+
+        _controller!.onConnectionChanged.listen((connected) {
+          if (!connected && _lastDevice != null) {
+            _scheduleReconnect();
+          }
+          notifyListeners();
+        });
+
+        final success = await _controller!.connect();
+
+        if (success) {
+          _reconnectAttempts = 0;
+          _prefs?.setString('last_device_ip', device.ip);
+          _startKeepAlive();
+        } else {
+          _errorController.add('Connection failed. The TV may need re-pairing.');
+        }
+
+        notifyListeners();
+        return success;
+      } catch (e) {
+        _controller = null;
+        _errorController.add('Connection error: ${e.toString()}');
+        notifyListeners();
+        return false;
+      }
+    }
+
+    // For non-Android TV devices: use the old controller factory
     await disconnect(clearLast: false);
-    
+
     try {
       _controller = ControllerFactory.create(device);
       _lastDevice = device;
@@ -128,7 +286,7 @@ class RemoteProvider extends ChangeNotifier with WidgetsBindingObserver {
         _prefs?.setString('last_device_ip', device.ip);
         _startKeepAlive();
       } else {
-        _errorController.add('Pairing failed or connection refused by TV.');
+        _errorController.add('Connection failed or refused by TV.');
       }
 
       notifyListeners();
@@ -189,17 +347,26 @@ class RemoteProvider extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   /// Start repeating a command on long-press (e.g., volume hold).
-  /// Fires immediately, then repeats at 100ms intervals.
+  /// For Android TV: uses START_LONG protocol direction for true long-press.
   void startRepeat(RemoteCommand command) {
     stopRepeat();
-    sendCommand(command); // Fire first one immediately
-    _repeatTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
-      _controller?.sendCommand(command);
-    });
+
+    if (_controller is AndroidTVController) {
+      // Use native long-press support from the Android TV protocol
+      (_controller as AndroidTVController).startLongPress(command);
+    } else {
+      sendCommand(command); // Fire first one immediately
+      _repeatTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
+        _controller?.sendCommand(command);
+      });
+    }
   }
 
   /// Stop repeating commands (on long-press release).
-  void stopRepeat() {
+  void stopRepeat({RemoteCommand? command}) {
+    if (_controller is AndroidTVController && command != null) {
+      (_controller as AndroidTVController).endLongPress(command);
+    }
     _repeatTimer?.cancel();
     _repeatTimer = null;
   }
@@ -217,6 +384,13 @@ class RemoteProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// Get installed apps (if the platform supports it).
   Future<List<Map<String, String>>> getInstalledApps() async {
     return await _controller?.getInstalledApps() ?? [];
+  }
+
+  /// Send a named command directly (for Android TV key names).
+  void sendNamedCommand(String command) {
+    if (_controller is AndroidTVController) {
+      (_controller as AndroidTVController).sendNamedCommand(command);
+    }
   }
 
   @override
@@ -238,6 +412,7 @@ class RemoteProvider extends ChangeNotifier with WidgetsBindingObserver {
     _repeatTimer?.cancel();
     _errorController.close();
     _controller?.disconnect();
+    _connectionManager.dispose();
     super.dispose();
   }
 }

@@ -16,19 +16,26 @@ class CommandService {
   bool get isConnected => _isConnected;
 
   Future<void> connect(TvDevice device) async {
+    // If device has a pairing token, we use the new authenticated HTTP protocol
+    if (device.pairingToken != null) {
+      _isConnected = true;
+      _connectionStateController.add(true);
+      return;
+    }
+
     if (device.brand != TvBrand.samsung) {
-      throw Exception('Currently only Samsung (Tizen) TVs are fully supported by this WebSocket client.');
+      throw Exception('This device requires pairing or is not yet supported.');
     }
 
     try {
       final prefs = await SharedPreferences.getInstance();
-      _pairedToken = prefs.getString('samsung_token_\${device.ip}');
+      _pairedToken = prefs.getString('samsung_token_${device.ip}');
       
       final appName = base64Encode(utf8.encode('Volt App'));
-      String url = 'wss://\${device.ip}:8002/api/v2/channels/samsung.remote.control?name=\$appName';
+      String url = 'wss://${device.ip}:8002/api/v2/channels/samsung.remote.control?name=$appName';
       
       if (_pairedToken != null) {
-        url += '&token=\$_pairedToken';
+        url += '&token=$_pairedToken';
       }
 
       final uri = Uri.parse(url);
@@ -42,7 +49,7 @@ class CommandService {
       }, onDone: () {
         _handleDisconnect();
       }, onError: (error) {
-        print('WebSocket Error: \$error');
+        print('WebSocket Error: $error');
         _handleDisconnect();
       });
     } catch (e) {
@@ -60,7 +67,7 @@ class CommandService {
         final token = data['data']?['token'];
         if (token != null) {
           _pairedToken = token;
-          prefs.setString('samsung_token_\$ip', token);
+          prefs.setString('samsung_token_$ip', token);
         }
       }
     }
@@ -73,7 +80,28 @@ class CommandService {
     _channel = null;
   }
 
-  void sendCommand(RemoteCommand command) {
+  Future<void> sendCommand(RemoteCommand command, {TvDevice? device}) async {
+    // High-priority: New Pairing Protocol (HTTP)
+    if (device?.pairingToken != null) {
+      final url = Uri.parse('http://${device!.ip}:8080/command');
+      try {
+        await http.post(
+          url,
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ${device.pairingToken}',
+          },
+          body: jsonEncode({
+            'action': command.label.toUpperCase().replaceAll(' ', '_'),
+          }),
+        ).timeout(const Duration(milliseconds: 500));
+      } catch (e) {
+        print('HTTP Command Error: $e');
+      }
+      return;
+    }
+
+    // Classic Protocol (Samsung WebSocket)
     if (_channel == null || !_isConnected) return;
     
     final payload = jsonEncode({

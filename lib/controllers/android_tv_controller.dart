@@ -1,105 +1,204 @@
 import 'dart:async';
-import 'dart:convert';
-import 'package:http/http.dart' as http;
 import '../models/tv_device.dart';
 import '../models/remote_command.dart';
+import '../services/connection_manager.dart';
+import '../services/certificate_manager.dart';
+import '../services/protobuf_codec.dart';
 import 'tv_device_controller.dart';
 
 /// Android TV / Google TV controller.
-/// Uses the Android TV Remote Control Protocol v2 over a TCP connection.
-/// Fallback: Android Debug Bridge (ADB) shell commands via WiFi.
-/// 
-/// Note: The full gRPC-based Android TV Remote protocol requires 
-/// certificate-based pairing. This implementation uses the HTTP REST
-/// fallback for basic control where available (e.g., via Google Home API
-/// or ADB over WiFi).
+///
+/// Uses the multi-strategy ConnectionManager:
+///   1. Android TV Remote Protocol v2 (TLS + protobuf)
+///   2. Google Cast HTTP fallback
+///   3. ADB over WiFi fallback
+///
+/// Once paired via the TLS handshake (port 6467), subsequent connections
+/// are instant — no re-pairing needed. Commands are sent over a persistent
+/// socket (port 6466) with near-zero latency.
 class AndroidTVController extends TVDeviceController {
   @override
   final TvDevice device;
-  
-  bool _connected = false;
-  final _connectionController = StreamController<bool>.broadcast();
 
-  AndroidTVController(this.device);
+  late final ConnectionManager _connectionManager;
+  final _connectionController = StreamController<bool>.broadcast();
+  bool _initialized = false;
+
+  AndroidTVController(this.device) {
+    final certManager = CertificateManager();
+    _connectionManager = ConnectionManager(certManager);
+
+    // Forward connection events
+    _connectionManager.onMethodChanged.listen((method) {
+      _connectionController.add(method != ConnectionMethod.none);
+    });
+  }
+
+  /// Provide a constructor that accepts an existing ConnectionManager.
+  /// Used when the provider already has one initialized.
+  AndroidTVController.withManager(this.device, this._connectionManager) {
+    _initialized = true;
+    _connectionManager.onMethodChanged.listen((method) {
+      _connectionController.add(method != ConnectionMethod.none);
+    });
+  }
 
   @override
-  bool get isConnected => _connected;
+  bool get isConnected => _connectionManager.isConnected;
 
   @override
   Stream<bool> get onConnectionChanged => _connectionController.stream;
 
+  /// The active connection method.
+  ConnectionMethod get connectionMethod => _connectionManager.activeMethod;
+
+  /// Device info from the TV (after connection).
+  String get deviceModel => _connectionManager.atvService.deviceModel;
+  String get deviceVendor => _connectionManager.atvService.deviceVendor;
+
+  /// Volume info stream.
+  Stream<dynamic> get onVolumeChanged => _connectionManager.atvService.onVolumeChanged;
+
+  /// Power state stream.
+  Stream<bool> get onPowerChanged => _connectionManager.atvService.onPowerChanged;
+
   @override
   Future<bool> connect() async {
-    // Android TV remote protocol (v2) uses gRPC on port 6466
-    // For MVP: we verify reachability and mark as connected
-    try {
-      // Attempt an ADB connection check
-      // In production, this would use the gRPC pairing handshake
-      _connected = true;
-      _connectionController.add(true);
-      return true;
-    } catch (e) {
-      _onDisconnect();
+    if (!_initialized) {
+      await _connectionManager.initialize();
+      _initialized = true;
+    }
+
+    // Check if already paired
+    final paired = await _connectionManager.isPaired(device.ip);
+    if (!paired) {
+      // Need to pair first
       return false;
     }
+
+    final method = await _connectionManager.connect(device.ip, deviceType: device.brand.name);
+    return method != ConnectionMethod.none;
   }
 
-  void _onDisconnect() {
-    _connected = false;
-    _connectionController.add(false);
+  /// Start pairing process. TV will show a 6-digit code.
+  Future<void> startPairing() async {
+    if (!_initialized) {
+      await _connectionManager.initialize();
+      _initialized = true;
+    }
+    await _connectionManager.startPairing(device.ip);
+  }
+
+  /// Submit pairing code. Returns true on success.
+  Future<bool> submitPairingCode(String code) async {
+    final success = await _connectionManager.submitPairingCode(device.ip, code);
+    if (success) {
+      // Now connect the remote control channel
+      final method = await _connectionManager.connect(device.ip, deviceType: device.brand.name);
+      return method != ConnectionMethod.none;
+    }
+    return false;
   }
 
   @override
-  Future<void> disconnect() async => _onDisconnect();
-
-  /// Send an ADB shell keyevent command.
-  /// Requires ADB over WiFi to be enabled on the Android TV.
-  Future<void> _sendKeyEvent(int keyCode) async {
-    // In production: connect to ADB port 5555 and send shell command
-    // `input keyevent $keyCode`
-    // For now, this is a placeholder for the ADB socket implementation
+  Future<void> disconnect() async {
+    _connectionManager.disconnect();
   }
 
   @override
   Future<void> sendCommand(RemoteCommand command) async {
-    if (!_connected) return;
-    
-    // Android KeyEvent codes
-    final keyCode = _androidKeyCode(command);
+    if (!isConnected) return;
+
+    final keyCode = _remoteCommandToKeyCode(command);
     if (keyCode != null) {
-      await _sendKeyEvent(keyCode);
+      _connectionManager.sendKeyCode(keyCode);
     }
   }
 
-  int? _androidKeyCode(RemoteCommand command) {
-    switch (command) {
-      case RemoteCommand.power: return 26;        // KEYCODE_POWER
-      case RemoteCommand.volumeUp: return 24;     // KEYCODE_VOLUME_UP
-      case RemoteCommand.volumeDown: return 25;   // KEYCODE_VOLUME_DOWN
-      case RemoteCommand.mute: return 164;        // KEYCODE_VOLUME_MUTE
-      case RemoteCommand.channelUp: return 166;   // KEYCODE_CHANNEL_UP
-      case RemoteCommand.channelDown: return 167; // KEYCODE_CHANNEL_DOWN
-      case RemoteCommand.up: return 19;           // KEYCODE_DPAD_UP
-      case RemoteCommand.down: return 20;         // KEYCODE_DPAD_DOWN
-      case RemoteCommand.left: return 21;         // KEYCODE_DPAD_LEFT
-      case RemoteCommand.right: return 22;        // KEYCODE_DPAD_RIGHT
-      case RemoteCommand.enter: return 23;        // KEYCODE_DPAD_CENTER
-      case RemoteCommand.back: return 4;          // KEYCODE_BACK
-      case RemoteCommand.home: return 3;          // KEYCODE_HOME
-      case RemoteCommand.play: return 126;        // KEYCODE_MEDIA_PLAY
-      case RemoteCommand.pause: return 127;       // KEYCODE_MEDIA_PAUSE
-      case RemoteCommand.fastForward: return 90;  // KEYCODE_MEDIA_FAST_FORWARD
-      case RemoteCommand.rewind: return 89;       // KEYCODE_MEDIA_REWIND
+  /// Send a key code with a long-press start.
+  void startLongPress(RemoteCommand command) {
+    final keyCode = _remoteCommandToKeyCode(command);
+    if (keyCode != null) {
+      _connectionManager.startLongPress(keyCode);
     }
+  }
+
+  /// End a long press.
+  void endLongPress(RemoteCommand command) {
+    final keyCode = _remoteCommandToKeyCode(command);
+    if (keyCode != null) {
+      _connectionManager.endLongPress(keyCode);
+    }
+  }
+
+  /// Send a named command directly.
+  void sendNamedCommand(String command) {
+    _connectionManager.sendCommand(command);
   }
 
   @override
   Future<void> sendText(String text) async {
-    // ADB: `input text "$text"`
+    _connectionManager.sendText(text);
   }
 
   @override
   Future<void> launchApp(String appId) async {
-    // ADB: `am start -n $appId`
+    _connectionManager.launchApp(appId);
   }
+
+  @override
+  Future<int> getVolume() async {
+    final vol = _connectionManager.atvService.volumeInfo;
+    if (vol != null && vol.max > 0) {
+      return ((vol.level / vol.max) * 100).round();
+    }
+    return -1;
+  }
+
+  @override
+  Future<bool> isPoweredOn() async {
+    return _connectionManager.atvService.isOn;
+  }
+
+  int? _remoteCommandToKeyCode(RemoteCommand command) {
+    switch (command) {
+      case RemoteCommand.power:
+        return AndroidKeyCode.power;
+      case RemoteCommand.volumeUp:
+        return AndroidKeyCode.volumeUp;
+      case RemoteCommand.volumeDown:
+        return AndroidKeyCode.volumeDown;
+      case RemoteCommand.mute:
+        return AndroidKeyCode.volumeMute;
+      case RemoteCommand.channelUp:
+        return AndroidKeyCode.channelUp;
+      case RemoteCommand.channelDown:
+        return AndroidKeyCode.channelDown;
+      case RemoteCommand.up:
+        return AndroidKeyCode.dpadUp;
+      case RemoteCommand.down:
+        return AndroidKeyCode.dpadDown;
+      case RemoteCommand.left:
+        return AndroidKeyCode.dpadLeft;
+      case RemoteCommand.right:
+        return AndroidKeyCode.dpadRight;
+      case RemoteCommand.enter:
+        return AndroidKeyCode.dpadCenter;
+      case RemoteCommand.back:
+        return AndroidKeyCode.back;
+      case RemoteCommand.home:
+        return AndroidKeyCode.home;
+      case RemoteCommand.play:
+        return AndroidKeyCode.mediaPlay;
+      case RemoteCommand.pause:
+        return AndroidKeyCode.mediaPause;
+      case RemoteCommand.fastForward:
+        return AndroidKeyCode.mediaFastForward;
+      case RemoteCommand.rewind:
+        return AndroidKeyCode.mediaRewind;
+    }
+  }
+
+  /// Access the connection manager for advanced operations.
+  ConnectionManager get connectionManager => _connectionManager;
 }
