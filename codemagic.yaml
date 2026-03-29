@@ -1,95 +1,33 @@
 workflows:
-  ios-release:
-    name: iOS Release Pipeline
+  ios-unsigned-ipa:
+    name: iOS Unsigned IPA (AltStore)
     instance_type: mac_mini_m2
+
     environment:
       flutter: stable
-      xcode: latest
-      cocoapods: default
+
     triggering:
       events:
         - push
       branch_patterns:
         - pattern: main
           include: true
-          source: true
+
     scripts:
       - name: Install dependencies
         script: |
-          flutter packages pub get
-      - name: Build iOS App and Create IPA
+          flutter pub get
+
+      - name: Build iOS (NO SIGNING)
         script: |
-          set -e # Stop on error
-          
-          # 1. Trigger Flutter to generate Podfile and projects without building
-          flutter build ios --config-only
-          
-          # 2. Force manual signing style inside the Xcode project
-          sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' ios/Runner.xcodeproj/project.pbxproj || true
-          sed -i '' 's/CODE_SIGN_IDENTITY = "Apple Development";/CODE_SIGN_IDENTITY = "";/g' ios/Runner.xcodeproj/project.pbxproj || true
-          sed -i '' 's/"CODE_SIGN_IDENTITY\[sdk=iphoneos\*\]" = "iPhone Developer";/"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "";/g' ios/Runner.xcodeproj/project.pbxproj || true
-          
-          # 3. Add to Podfile to forcefully suppress singing requirements for all Pods
-          if [ -f "ios/Podfile" ]; then
-            echo "post_install do |installer|" >> ios/Podfile
-            echo "  installer.pods_project.targets.each do |target|" >> ios/Podfile
-            echo "    target.build_configurations.each do |config|" >> ios/Podfile
-            echo "      config.build_settings['CODE_SIGNING_ALLOWED'] = 'NO'" >> ios/Podfile
-            echo "      config.build_settings['CODE_SIGNING_REQUIRED'] = 'NO'" >> ios/Podfile
-            echo "      config.build_settings['CODE_SIGN_IDENTITY'] = '-'" >> ios/Podfile
-            echo "      config.build_settings['EXPANDED_CODE_SIGN_IDENTITY'] = '-'" >> ios/Podfile
-            echo "    end" >> ios/Podfile
-            echo "  end" >> ios/Podfile
-            echo "end" >> ios/Podfile
-            cd ios && pod install && cd ..
-          fi
-          
-          # 4. Use raw xcodebuild with Ad-Hoc signing ("-") to bypass the Apple Developer requirement
-          # Flutter tool intercepts errors, xcodebuild bypasses flutter tool checking entirely!
-          cd ios
-          xcodebuild build -workspace Runner.xcworkspace -scheme Runner -configuration Release \
-            CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="-" EXPANDED_CODE_SIGN_IDENTITY="-" \
-            -destination 'generic/platform=iOS' \
-            SYMROOT="${PWD}/../build/ios" \
-            COMPILER_INDEX_STORE_ENABLE=NO
-          cd ..
-          
-          # 5. Package the IPA accurately
+          flutter build ios --release --no-codesign
+
+      - name: Create IPA manually
+        script: |
           mkdir -p build/ios/ipa/Payload
-          
-          if [ -d "build/ios/Release-iphoneos/Runner.app" ]; then
-            cp -RL build/ios/Release-iphoneos/Runner.app build/ios/ipa/Payload/
-          else
-            echo "Error: Could not find Runner.app"
-            exit 1
-          fi
-          
+          cp -r build/ios/iphoneos/Runner.app build/ios/ipa/Payload/
           cd build/ios/ipa
-          zip -qr app.ipa Payload
+          zip -r app.ipa Payload
+
     artifacts:
       - build/ios/ipa/app.ipa
-      
-  # Optional: Keep the Android Pipeline if you need the dual platform configuration
-  android-release:
-    name: Android Release Pipeline
-    instance_type: mac_mini_m2
-    environment:
-      flutter: stable
-    triggering:
-      events:
-        - push
-      branch_patterns:
-        - pattern: main
-          include: true
-          source: true
-    scripts:
-      - name: Install dependencies
-        script: flutter packages pub get
-      - name: Build Android App (APK & AAB)
-        script: |
-          flutter build apk --release
-          flutter build appbundle --release
-    artifacts:
-      - build/app/outputs/flutter-apk/app-release.apk
-      - build/app/outputs/bundle/release/app-release.aab
