@@ -1,4 +1,28 @@
 workflows:
+  android-release:
+    name: Android Release Pipeline
+    instance_type: mac_mini_m2
+    environment:
+      flutter: stable
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+          source: true
+    scripts:
+      - name: Install dependencies
+        script: |
+          flutter packages pub get
+      - name: Build Android App (APK & AAB)
+        script: |
+          flutter build apk --release
+          flutter build appbundle --release
+    artifacts:
+      - build/app/outputs/flutter-apk/app-release.apk
+      - build/app/outputs/bundle/release/app-release.aab
+
   ios-release:
     name: iOS Release Pipeline
     instance_type: mac_mini_m2
@@ -26,10 +50,3 @@ workflows:
           zip -qr app.ipa Payload
     artifacts:
       - build/ios/ipa/app.ipa
-    publishing:
-      email:
-        recipients:
-          - user@example.com
-        notify:
-          success: true
-          failure: true
