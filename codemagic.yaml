@@ -1,28 +1,4 @@
 workflows:
-  android-release:
-    name: Android Release Pipeline
-    instance_type: mac_mini_m2
-    environment:
-      flutter: stable
-    triggering:
-      events:
-        - push
-      branch_patterns:
-        - pattern: main
-          include: true
-          source: true
-    scripts:
-      - name: Install dependencies
-        script: |
-          flutter packages pub get
-      - name: Build Android App (APK & AAB)
-        script: |
-          flutter build apk --release
-          flutter build appbundle --release
-    artifacts:
-      - build/app/outputs/flutter-apk/app-release.apk
-      - build/app/outputs/bundle/release/app-release.aab
-
   ios-release:
     name: iOS Release Pipeline
     instance_type: mac_mini_m2
@@ -45,19 +21,23 @@ workflows:
         script: |
           set -e # Stop on error
           
-          # Disable code signing explicitly in the Flutter xcconfig to prevent Xcode 14+ failures
+          # Fix: Aggressively disable code signing requirements for Xcode 14+ and Pods
           echo "CODE_SIGNING_ALLOWED = NO" >> ios/Flutter/Release.xcconfig
           echo "CODE_SIGNING_REQUIRED = NO" >> ios/Flutter/Release.xcconfig
           echo "CODE_SIGN_IDENTITY = " >> ios/Flutter/Release.xcconfig
           echo "EXPANDED_CODE_SIGN_IDENTITY = " >> ios/Flutter/Release.xcconfig
           
-          # Run flutter build
+          # Force remove target-level code signing overrides in project.pbxproj
+          sed -i '' 's/CODE_SIGN_IDENTITY = "Apple Development";/CODE_SIGN_IDENTITY = "";/g' ios/Runner.xcodeproj/project.pbxproj || true
+          sed -i '' 's/"CODE_SIGN_IDENTITY\[sdk=iphoneos\*\]" = "iPhone Developer";/"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "";/g' ios/Runner.xcodeproj/project.pbxproj || true
+          
+          # Build the raw Runner.app unsigned
           flutter build ios --release --no-codesign
           
+          # Create Payload directory
           mkdir -p build/ios/ipa/Payload
           
-          # Flutter puts the output in Release-iphoneos, and optionally a symlink in iphoneos.
-          # We use cp -RL to ensure we copy the actual directory, not just a symlink.
+          # Fix: Use cp -RL to copy the actual directory content, not a broken symlink
           if [ -d "build/ios/Release-iphoneos/Runner.app" ]; then
             cp -RL build/ios/Release-iphoneos/Runner.app build/ios/ipa/Payload/
           elif [ -d "build/ios/iphoneos/Runner.app" ]; then
@@ -67,7 +47,32 @@ workflows:
             exit 1
           fi
           
+          # Package the IPA correctly for AltStore
           cd build/ios/ipa
           zip -qr app.ipa Payload
     artifacts:
       - build/ios/ipa/app.ipa
+      
+  # Optional: Keep the Android Pipeline if you need the dual platform configuration
+  android-release:
+    name: Android Release Pipeline
+    instance_type: mac_mini_m2
+    environment:
+      flutter: stable
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+          source: true
+    scripts:
+      - name: Install dependencies
+        script: flutter packages pub get
+      - name: Build Android App (APK & AAB)
+        script: |
+          flutter build apk --release
+          flutter build appbundle --release
+    artifacts:
+      - build/app/outputs/flutter-apk/app-release.apk
+      - build/app/outputs/bundle/release/app-release.aab
